@@ -270,6 +270,41 @@ In this case, sum of memory.min (24 GiB) is well below node allocatable (64 GiB)
 
 ---
 
+## 13. Application Latency Impact
+
+Measured operation latency (1000 dict insertions) while gradually allocating memory from 0 to 512 MiB with memory.high at 460 MiB.
+
+| Phase | Memory | Latency | Ratio |
+|-------|--------|---------|-------|
+| Baseline (0-450 MiB) | Below memory.high | ~0.63ms | 1x |
+| At 455 MiB | Just past memory.high | 100.2ms | 157x |
+| Beyond 455 MiB | Deep throttle | Allocator stalled | -- |
+
+Raw data: [`data/latency-impact.csv`](data/latency-impact.csv)
+
+![latency-impact](images/10-latency-impact.png)
+
+Latency is flat at ~0.63ms until memory crosses memory.high, then jumps 157x. After the spike, the allocator cannot complete the next 5 MiB allocation at all - it's blocked in kernel reclaim. This quantifies the silent degradation concern raised in [#2570 comment](https://github.com/kubernetes/enhancements/issues/2570#issuecomment-3960592763). With 426K throttle events recorded at this point, the `memory.events` high counter is the only signal that something is wrong.
+
+---
+
+## 14. Repeated Trials (factor 0.8)
+
+Three runs of the same throttle test to show variance.
+
+| Trial | Duration (s) | Throttle events | Outcome |
+|-------|-------------|-----------------|---------|
+| 1 | 507 | 18,756 | OOMKilled |
+| 2 | 426 | 15,231 | OOMKilled |
+| 3 | 486 | 15,163 | OOMKilled |
+| **Median** | **486** | **15,231** | |
+
+Raw data: [`data/repeated-trial-*.csv`](data/)
+
+Duration ranges from 426s to 507s (16% spread). The variance comes from kernel scheduling and reclaim timing, not from the MemoryQoS implementation. All three runs follow the same pattern: linear ramp to memory.high, then slow progression to OOM-kill.
+
+---
+
 ## Notes
 
 - `memoryThrottlingFactor=0.8` is the kubelet default. Tests use this unless stated otherwise.
