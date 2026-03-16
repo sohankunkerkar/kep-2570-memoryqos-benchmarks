@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: memqos-no-limit
+spec:
+  containers:
+  - name: test
+    image: python:3.12-slim
+    command: ["sleep", "60"]
+    resources:
+      requests:
+        memory: "128Mi"
+      # no memory limit
+  restartPolicy: Never

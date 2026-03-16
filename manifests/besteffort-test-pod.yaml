@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: memqos-besteffort
+spec:
+  containers:
+  - name: test
+    image: python:3.12-slim
+    command: ["sleep", "60"]
+    # no resources — BestEffort QoS
+  restartPolicy: Never

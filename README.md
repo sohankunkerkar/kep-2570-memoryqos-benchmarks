@@ -191,6 +191,72 @@ kubelet_memory_qos_node_memory_min_total_bytes 3.0408704e+08
 
 ---
 
+## 8. BestEffort Pod Behavior
+
+Pod with no resource requests or limits.
+
+**Pod spec**: [`manifests/besteffort-test-pod.yaml`](manifests/besteffort-test-pod.yaml)
+
+| cgroup knob | Value |
+|-------------|-------|
+| memory.high | `max` |
+| memory.max | `max` |
+| memory.min | 0 |
+| pod memory.min | 0 |
+
+No throttling, no protection, no limit. BestEffort pods are first to be evicted under memory pressure — `memory.min=0` means the kernel can reclaim all their memory.
+
+---
+
+## 9. Multi-Container Pod
+
+Two containers in one pod: container-a (requests=128Mi, limits=256Mi) and container-b (requests=64Mi, limits=128Mi).
+
+**Pod spec**: [`manifests/multi-container-test-pod.yaml`](manifests/multi-container-test-pod.yaml)
+
+| Resource | memory.min | memory.high |
+|----------|-----------|------------|
+| Container A (req=128Mi, lim=256Mi) | 128 MiB | 230 MiB |
+| Container B (req=64Mi, lim=128Mi) | 64 MiB | 115 MiB |
+| **Pod total** | **192 MiB** | — |
+
+Pod-level `memory.min` = 128 + 64 = 192 MiB. Each container's `memory.high` is computed independently from its own requests and limits.
+
+---
+
+## 10. Pod Without Memory Limit
+
+Burstable pod with requests=128Mi but no memory limit. Node allocatable: 63,996 MiB.
+
+**Pod spec**: [`manifests/no-limit-test-pod.yaml`](manifests/no-limit-test-pod.yaml)
+
+| cgroup knob | Value |
+|-------------|-------|
+| memory.min | 128 MiB |
+| memory.high | 51,223 MiB |
+| memory.max | `max` |
+
+When no limit is set, the `memory.high` formula uses node allocatable instead of limits:
+`memory.high = 128 + 0.8 × (63,996 − 128) = 51,222 MiB`. The actual value (51,223 MiB) matches after page-size alignment.
+
+---
+
+## 11. Pod Deletion Cleanup
+
+Created a pod with requests=200Mi, verified the QoS-class `memory.min` increased by 200 MiB, deleted the pod, verified `memory.min` returned to its original value after the next reconciliation loop (60s).
+
+**Pod spec**: [`manifests/deletion-test-pod.yaml`](manifests/deletion-test-pod.yaml)
+
+| State | Burstable QoS memory.min |
+|-------|-------------------------|
+| Before pod creation | 240 MiB |
+| After pod created (+ 60s loop) | 440 MiB (+200 MiB) |
+| After pod deleted (+ 60s loop) | 240 MiB (back to original) |
+
+The periodic `setMemoryQoS` loop correctly adds and removes `memory.min` contributions as pods come and go. The 60s loop interval means there's a brief window where the value is stale after pod creation or deletion.
+
+---
+
 ## References
 
 - [KEP-2570: Memory QoS](https://github.com/kubernetes/enhancements/issues/2570)

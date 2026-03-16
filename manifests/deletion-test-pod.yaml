@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: memqos-deletion-test
+spec:
+  containers:
+  - name: test
+    image: python:3.12-slim
+    command: ["sleep", "300"]
+    resources:
+      requests:
+        memory: "200Mi"
+      limits:
+        memory: "400Mi"
+  restartPolicy: Never
