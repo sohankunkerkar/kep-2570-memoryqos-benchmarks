@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: memqos-throttle-test
+  namespace: default
+spec:
+  containers:
+  - name: allocator
+    image: python:3.12-slim
+    command:
+    - python3
+    - -c
+    - |
+      import time, sys, os
+
+      CHUNK_SIZE = 10 * 1024 * 1024  # 10 MiB per step
+      INTERVAL = 1  # seconds between allocations
+
+      chunks = []
+      total = 0
+      print(f"PID={os.getpid()}, starting gradual memory allocation", flush=True)
+      print(f"Allocating {CHUNK_SIZE // (1024*1024)} MiB every {INTERVAL}s", flush=True)
+
+      while True:
+          try:
+              chunk = bytearray(CHUNK_SIZE)
+              # Touch every page to ensure physical allocation
+              for i in range(0, len(chunk), 4096):
+                  chunk[i] = 1
+              chunks.append(chunk)
+              total += CHUNK_SIZE
+              print(f"allocated={total // (1024*1024)} MiB", flush=True)
+              time.sleep(INTERVAL)
+          except MemoryError:
+              print(f"MemoryError at {total // (1024*1024)} MiB", flush=True)
+              time.sleep(5)
+    resources:
+      requests:
+        memory: "256Mi"
+      limits:
+        memory: "512Mi"
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 0

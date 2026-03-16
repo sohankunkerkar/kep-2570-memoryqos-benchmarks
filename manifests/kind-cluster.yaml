@@ -1,0 +1,12 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+  image: memqos-node:latest  # custom build from memqos-kernel-metrics-e2e branch
+  kubeadmConfigPatches:
+  - |
+    kind: KubeletConfiguration
+    featureGates:
+      MemoryQoS: true
+    memoryReservationPolicy: "HardReservation"
+    memoryThrottlingFactor: 0.8

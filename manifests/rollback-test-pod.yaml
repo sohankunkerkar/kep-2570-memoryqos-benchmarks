@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: memqos-rollback-test
+  namespace: default
+spec:
+  containers:
+  - name: test
+    image: python:3.12-slim
+    command: ["sleep", "300"]
+    resources:
+      requests:
+        memory: "128Mi"
+      limits:
+        memory: "256Mi"
+  restartPolicy: Never
