@@ -255,7 +255,7 @@ def main():
 
     csv_file = sys.argv[1]
     output_dir = sys.argv[2]
-    throttle_factor = float(sys.argv[3]) if len(sys.argv) > 3 else 0.8
+    throttle_factor = float(sys.argv[3]) if len(sys.argv) > 3 else 0.9
 
     os.makedirs(output_dir, exist_ok=True)
 

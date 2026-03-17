@@ -181,6 +181,83 @@ kubelet_memory_qos_node_memory_min_total_bytes 5.05413632e+08
 
 ---
 
+## 9. Pod Without Memory Limit
+
+Burstable pod with requests=128Mi but no memory limit. Node allocatable: 63,996 MiB.
+
+**Pod spec**: [`manifests/no-limit-test-pod.yaml`](manifests/no-limit-test-pod.yaml)
+
+| cgroup knob | Value |
+|-------------|-------|
+| memory.min | 128 MiB |
+| memory.high | 57,609 MiB |
+| memory.max | `max` |
+
+When no limit is set, `memory.high = 128 + 0.9 * (63,996 - 128) = 57,510 MiB` (actual 57,609 after page alignment).
+
+---
+
+## 10. High Aggregate memory.min
+
+Three pods each requesting 8Gi on a node with 64Gi allocatable. Sum is below allocatable in this test.
+
+| Level | memory.min |
+|-------|-----------|
+| Pod 1 | 8,192 MiB |
+| Pod 2 | 8,192 MiB |
+| Pod 3 | 8,192 MiB |
+| burstable QoS total | 24,816 MiB |
+| kubepods total | 24,866 MiB |
+| node allocatable | 63,996 MiB |
+
+If sum(memory.min) exceeds available memory, the kernel proportionally reduces each cgroup's effective protection based on sibling ratios ([cgroup v2 docs](https://docs.kernel.org/admin-guide/cgroup-v2.html)).
+
+---
+
+## 11. Kubelet Overhead
+
+50 Burstable pods (requests=32Mi, limits=64Mi) at steady state.
+
+| Metric | Value |
+|--------|-------|
+| Kubelet CPU (30s average) | 2.00% of one core |
+| Kubelet memory | 79 MiB |
+| Pods managed | 50 |
+
+2.00% CPU is the total kubelet CPU, not MemoryQoS alone. The `setMemoryQoS` loop runs every 60s. Writing `memory.min=0` when already set is a kernel no-op (~20us per pod).
+
+---
+
+## 12. Rollback Safety
+
+Burstable pod (requests=128Mi, limits=256Mi). Disabled MemoryQoS by removing `memoryReservationPolicy` and setting `MemoryQoS: false`, then restarted kubelet. Waited 90s.
+
+| cgroup knob | Before | After (90s) |
+|-------------|--------|-------------|
+| pod memory.min | 128 MiB | 0 (cleared) |
+| burstable QoS memory.min | -- | 0 (cleared) |
+| container memory.high | 243 MiB | 243 MiB (stale) |
+| container memory.min | 128 MiB | 128 MiB (stale) |
+
+QoS-class and pod-level values are cleared by the reconcile loop. Container-level values persist because they are set via `Unified` at creation time and require CRI runtime support to update. Both `memoryReservationPolicy` and the feature gate must be removed before restart, otherwise kubelet validation rejects the config and won't start.
+
+---
+
+## 13. Repeated Trials (factor 0.9)
+
+Three runs of the same throttle test.
+
+| Trial | Duration (s) | Throttle events | Outcome |
+|-------|-------------|-----------------|---------|
+| 1 | 63 | 2,677 | OOMKilled |
+| 2 | 75 | 4,140 | OOMKilled |
+| 3 | 61 | 2,713 | OOMKilled |
+| **Median** | **63** | **2,713** | |
+
+Variance is 61-75s (19% spread). All three follow the same pattern.
+
+---
+
 ## Notes
 
 - `memoryThrottlingFactor=0.9` is the kubelet default. All tests use this value.
