@@ -4,7 +4,7 @@
 
 The kernel livelock that blocked beta in v1.28 is resolved on kernels >= 5.9. With the default `memoryThrottlingFactor=0.9`, a container that exceeds `memory.high` reaches OOM-kill within ~67 seconds rather than getting stuck indefinitely. Latency degrades progressively past `memory.high`, from sub-millisecond baseline to over 1 second at 505 MiB (19 MiB above the threshold), rather than as a sudden cliff. This gradual degradation makes the throttling behavior more predictable but also harder to detect without explicit signals. The `memory.events` high counter from the cgroup is the most direct indicator of this throttling.
 
-`memory.min` protection works correctly across the full cgroup hierarchy: container, pod, QoS class, and kubepods root levels. Multi-container pods aggregate correctly, pod deletion removes the contribution within one reconcile cycle (60s), and Guaranteed pods are exempt from throttling (`memory.high=max`). Kubelet overhead measured at 2% CPU for 50 pods in this single-node kind setup.
+`memory.min` protection works as expected across the cgroup hierarchy in this environment: container, pod, QoS class, and kubepods root levels. Multi-container pods aggregate correctly, pod deletion removes the contribution within one reconcile cycle (60s), and Guaranteed pods are exempt from throttling (`memory.high=max`). Kubelet overhead measured at 2% CPU for 50 pods in this single-node kind setup.
 
 On rollback, QoS-class and pod-level `memory.min` values clear to zero when the feature is properly disabled. Both `memoryReservationPolicy` and the feature gate must be removed before restarting the kubelet. Container-level values (`memory.high`, container `memory.min`) persist because they are set via the cgroup `Unified` map at container creation and require CRI runtime support to update at runtime.
 
@@ -15,7 +15,7 @@ On rollback, QoS-class and pod-level `memory.min` values clear to zero when the 
 | Component | Version |
 |-----------|---------|
 | Kernel | 6.18.5-100.fc42.x86_64 |
-| Kubelet | v1.36.0-alpha.2.710+b04eff2bcba2e5 |
+| Kubelet | v1.36.0-alpha.2 (commit [b04eff2bcba](https://github.com/sohankunkerkar/kubernetes/commit/b04eff2bcba)) |
 | Container Runtime | containerd 2.2.0 |
 | Cluster | kind, single control-plane node (fresh cluster) |
 | cgroup | v2 |
@@ -249,7 +249,15 @@ Burstable pod (requests=128Mi, limits=256Mi). Disabled MemoryQoS by removing `me
 | container memory.high | 243 MiB | 243 MiB (stale) |
 | container memory.min | 128 MiB | 128 MiB (stale) |
 
-QoS-class and pod-level values are cleared by the reconcile loop. Container-level values persist because they are set via `Unified` at creation time and require CRI runtime support to update. In this test, setting `MemoryQoS: false` while leaving `memoryReservationPolicy: HardReservation` in the config caused the kubelet to fail validation on startup (`"memoryReservationPolicy requires MemoryQoS feature gate to be enabled"`). Removing `memoryReservationPolicy` before disabling the gate resolved this.
+QoS-class and pod-level values are cleared by the reconcile loop. Container-level values persist because they are set via `Unified` at creation time and require CRI runtime support to update. In this test, setting `MemoryQoS: false` while leaving `memoryReservationPolicy: HardReservation` caused the kubelet to crash-loop on startup:
+
+```
+E0317 00:20:18.641775 662232 run.go:72] "command failed" err="failed to validate kubelet
+  configuration, error: invalid configuration: memoryReservationPolicy \"HardReservation\"
+  requires MemoryQoS feature gate to be enabled"
+```
+
+Removing `memoryReservationPolicy` before disabling the gate resolved this. The 496 MiB burstable QoS total includes system pods (coredns, kube-proxy).
 
 ---
 
