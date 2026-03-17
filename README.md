@@ -1,5 +1,15 @@
 # KEP-2570: MemoryQoS Benchmark Results
 
+## Summary
+
+The kernel livelock that blocked beta in v1.28 is resolved on kernels >= 5.9. With the default `memoryThrottlingFactor=0.9`, a container that exceeds `memory.high` reaches OOM-kill within ~67 seconds rather than getting stuck indefinitely. Latency degrades progressively past `memory.high`, from sub-millisecond baseline to over 1 second at 505 MiB (19 MiB above the threshold), rather than as a sudden cliff. This gradual degradation makes the throttling behavior more predictable but also harder to detect without explicit signals. The `memory.events` high counter from the cgroup is the most direct indicator of this throttling.
+
+`memory.min` protection works correctly across the full cgroup hierarchy: container, pod, QoS class, and kubepods root levels. Multi-container pods aggregate correctly, pod deletion removes the contribution within one reconcile cycle (60s), and Guaranteed pods are exempt from throttling (`memory.high=max`). Kubelet overhead is negligible at 2% CPU for 50 pods.
+
+On rollback, QoS-class and pod-level `memory.min` values clear to zero when the feature is properly disabled. Both `memoryReservationPolicy` and the feature gate must be removed before restarting the kubelet. Container-level values (`memory.high`, container `memory.min`) persist because they are set via the cgroup `Unified` map at container creation and require CRI runtime support to update at runtime.
+
+---
+
 ## Test Environment
 
 | Component | Version |
