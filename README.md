@@ -79,7 +79,7 @@ Raw data: [`data/`](data/) directory.
 
 ![factor-comparison-bars](images/05-factor-comparison-bars.png)
 
-Factor 1.0 disables throttling (memory.high = memory.max). Factor 0.9 takes longer than 0.8 because when memory.high is closer to memory.max, the kernel applies more aggressive reclaim pressure for each byte above the threshold. None of the settings caused a livelock.
+Factor 1.0 disables throttling (memory.high = memory.max). Factor 0.9 took longer than 0.8 in testing. The smaller gap between memory.high and memory.max at 0.9 (26 MiB vs 51 MiB at 0.8) appears to result in slower forward progress per throttle event, though the exact kernel behavior may vary by workload. None of the settings caused a livelock.
 
 ---
 
@@ -168,7 +168,14 @@ Burstable pod (requests=128Mi, limits=256Mi). MemoryQoS disabled via feature gat
 
 ![rollback](images/09-rollback.png)
 
-Cgroup values persist after disabling MemoryQoS because `setMemoryQoS` only runs when the feature gate is on (`qos_container_manager_linux.go:346`). Workaround: recreate pods after disabling the feature.
+Cgroup values persisted because the test only disabled the `MemoryQoS` feature gate but left `memoryReservationPolicy: HardReservation` in the config. The kubelet validation rejects this combination and the kubelet fails to start, so the reconcile loop never runs to clear stale values. This follows the standard kubelet pattern where feature-gated config fields are validated at startup.
+
+Correct rollback procedure:
+1. Set `memoryReservationPolicy` to `None` (or remove it)
+2. Set `MemoryQoS: false`
+3. Restart kubelet
+
+With this sequence, the kubelet starts, the reconcile loop runs, and stale QoS-class and pod-level `memory.min` values are cleared to 0. Container-level values (`memory.high`, container `memory.min`) still persist because they are set via `Unified` at container creation and require CRI runtime support to update.
 
 ---
 
@@ -253,9 +260,9 @@ The periodic `setMemoryQoS` loop correctly adds and removes `memory.min` contrib
 
 ---
 
-## 12. Overcommitted memory.min
+## 12. High Aggregate memory.min
 
-Three pods each requesting 8Gi (total 24Gi of memory.min) on a node with 64Gi allocatable.
+Three pods each requesting 8Gi (total 24Gi of memory.min) on a node with 64Gi allocatable. Sum is below allocatable in this test.
 
 | Level | memory.min |
 |-------|-----------|
@@ -284,7 +291,7 @@ Raw data: [`data/latency-impact.csv`](data/latency-impact.csv)
 
 ![latency-impact](images/10-latency-impact.png)
 
-Latency is flat at ~0.63ms until memory crosses memory.high, then jumps 157x. After the spike, the allocator cannot complete the next 5 MiB allocation at all - it's blocked in kernel reclaim. This quantifies the silent degradation concern raised in [#2570 comment](https://github.com/kubernetes/enhancements/issues/2570#issuecomment-3960592763). With 426K throttle events recorded at this point, the `memory.events` high counter is the only signal that something is wrong.
+Latency is flat at ~0.63ms until memory crosses memory.high, then jumps 157x. After the spike, the allocator cannot complete the next 5 MiB allocation at all - it's blocked in kernel reclaim. This quantifies the silent degradation concern raised in [#2570 comment](https://github.com/kubernetes/enhancements/issues/2570#issuecomment-3960592763). With 426K throttle events recorded at this point, the `memory.events` high counter is the most direct kernel-native signal for this throttling.
 
 ---
 
@@ -307,10 +314,10 @@ Duration ranges from 426s to 507s (16% spread). The variance comes from kernel s
 
 ## Notes
 
-- `memoryThrottlingFactor=0.8` is the kubelet default. Tests use this unless stated otherwise.
-- memory.high formula: `floor[(requests + factor * (limits - requests)) / pageSize] * pageSize`
+- The kubelet default for `memoryThrottlingFactor` is 0.9. Tests here use 0.8 (set explicitly in the kind cluster config) for a wider throttle zone.
+- memory.high formula: `floor[(requests + factor * (limits - requests)) / pageSize] * pageSize`. MiB values in tables are rounded from exact byte values.
 - When no memory limit is set, `limits` in the formula is replaced with node allocatable memory.
-- Data collection via CRI stats provider path, not cadvisor. cadvisor does not parse `memory.events` ([google/cadvisor#3345](https://github.com/google/cadvisor/pull/3345) was closed without merge).
+- Test data was collected by polling cgroup files directly on the node (not via kubelet API). The CRI MemoryEvents plumbing (PR #137760) is a separate effort to surface `memory.events` through the kubelet stats API. cadvisor does not parse `memory.events` ([google/cadvisor#3345](https://github.com/google/cadvisor/pull/3345) was closed without merge).
 - Factor 0.9 re-run showed >1400s with 666K throttle events before being stopped. The original data (25s) was captured mid-run and is not representative.
 
 ---
