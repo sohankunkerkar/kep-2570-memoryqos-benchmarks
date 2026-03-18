@@ -100,10 +100,10 @@ The `memory.events` high counter is the most direct kernel-native signal for thi
 ## 4. Node-Level Metric
 
 ```
-# HELP kubelet_memory_qos_protected_bytes_total Total cgroup v2 protected memory
+# HELP kubelet_memory_qos_node_protected_bytes Total cgroup v2 protected memory
 # in bytes across all pods on the node (memory.min for Guaranteed, memory.low for Burstable).
-# TYPE kubelet_memory_qos_protected_bytes_total gauge
-kubelet_memory_qos_protected_bytes_total 5.05413632e+08
+# TYPE kubelet_memory_qos_node_protected_bytes gauge
+kubelet_memory_qos_node_protected_bytes 5.05413632e+08
 ```
 
 505 MiB = total protected memory across all pods. Updated every 60 seconds.
