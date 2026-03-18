@@ -2,11 +2,11 @@
 
 ## Summary
 
-The kernel livelock that blocked beta in v1.28 is resolved on kernels >= 5.9. With the default `memoryThrottlingFactor=0.9`, a container that exceeds `memory.high` reaches OOM-kill within ~67 seconds rather than getting stuck indefinitely. Latency degrades progressively past `memory.high`, from sub-millisecond baseline to over 1 second at 505 MiB (19 MiB above the threshold), rather than as a sudden cliff. This gradual degradation makes the throttling behavior more predictable but also harder to detect without explicit signals. The `memory.events` high counter from the cgroup is the most direct indicator of this throttling.
+The kernel livelock that blocked beta in v1.28 is resolved on kernels >= 5.9. With the default `memoryThrottlingFactor=0.9`, a container that exceeds `memory.high` reaches OOM-kill within ~71 seconds rather than getting stuck indefinitely. Latency degrades progressively past `memory.high`, from sub-millisecond baseline to over 1 second at 505 MiB (19 MiB above the threshold), rather than as a sudden cliff.
 
-`memory.min` protection works as expected across the cgroup hierarchy in this environment: container, pod, QoS class, and kubepods root levels. Multi-container pods aggregate correctly, pod deletion removes the contribution within one reconcile cycle (60s), and Guaranteed pods are exempt from throttling (`memory.high=max`). Kubelet overhead measured at 2% CPU for 50 pods in this single-node kind setup.
+Tiered memory protection works as expected: Guaranteed pods get `memory.min` (hard, kernel never reclaims), Burstable pods get `memory.low` (soft, kernel prefers not to reclaim). The hierarchy propagates correctly across container, pod, QoS class, and kubepods root levels. Kubelet overhead measured at 2% CPU for 50 pods in this single-node kind setup.
 
-On rollback, QoS-class and pod-level `memory.min` values clear to zero when the feature is properly disabled. Both `memoryReservationPolicy` and the feature gate must be removed before restarting the kubelet. Container-level values (`memory.high`, container `memory.min`) persist because they are set via the cgroup `Unified` map at container creation and require CRI runtime support to update at runtime.
+On rollback, QoS-class and pod-level values clear to zero when the feature is properly disabled. Both `memoryReservationPolicy` and the feature gate must be removed before restarting the kubelet. Container-level values persist because they are set via the cgroup `Unified` map at container creation and require CRI runtime support to update at runtime.
 
 ---
 
@@ -15,264 +15,126 @@ On rollback, QoS-class and pod-level `memory.min` values clear to zero when the 
 | Component | Version |
 |-----------|---------|
 | Kernel | 6.18.5-100.fc42.x86_64 |
-| Kubelet | v1.36.0-alpha.2 (commit [b04eff2bcba](https://github.com/sohankunkerkar/kubernetes/commit/b04eff2bcba)) |
+| Kubelet | v1.36.0-alpha.2 (commit [c8468eacac5](https://github.com/sohankunkerkar/kubernetes/commit/c8468eacac5), tiered approach) |
 | Container Runtime | containerd 2.2.0 |
 | Cluster | kind, single control-plane node (fresh cluster) |
 | cgroup | v2 |
 
-The kind node image was built from the [memqos-kernel-metrics-e2e](https://github.com/sohankunkerkar/kubernetes/tree/memqos-kernel-metrics-e2e) branch using `kind build node-image`. Kubelet configuration: [`manifests/kind-cluster.yaml`](manifests/kind-cluster.yaml). System pods (coredns, kube-proxy, etc.) were running during all tests and contribute to cgroup hierarchy totals.
+Kubelet configuration: [`manifests/kind-cluster.yaml`](manifests/kind-cluster.yaml). System pods (coredns, kube-proxy, etc.) were running during all tests.
 
-Data was collected by polling cgroup files (`memory.current`, `memory.high`, `memory.max`, `memory.min`, `memory.events`, `memory.stat`) every 1s from the container's cgroup path on the node. Collection script: [`scripts/collect-cgroup-data.sh`](scripts/collect-cgroup-data.sh).
+Data was collected by polling cgroup files every 1s from the container's cgroup path on the node. Collection script: [`scripts/collect-cgroup-data.sh`](scripts/collect-cgroup-data.sh).
 
 ---
 
-## 1. memory.high Throttle Behavior (Livelock Fix Verification)
+## 1. memory.high Throttle Behavior (Livelock Fix)
 
-Beta was blocked in v1.28 because a [kernel bug](https://github.com/torvalds/linux/commit/b3ff92916af) (fixed in 5.9) caused processes to get stuck in an infinite reclaim loop at `memory.high`. This test verifies the fix on a modern kernel.
+**Pod spec**: [`manifests/throttle-test-pod.yaml`](manifests/throttle-test-pod.yaml) - Burstable pod, requests=256Mi, limits=512Mi.
 
-**Pod spec**: [`manifests/throttle-test-pod.yaml`](manifests/throttle-test-pod.yaml) - Burstable pod, requests=256Mi, limits=512Mi. Container allocates 10 MiB/s, touching every page.
-
-**Kubelet config**: `memoryThrottlingFactor=0.9` (kubelet default)
-
-Expected cgroup values:
-- `memory.high` = 256 + 0.9 * (512 - 256) = 486.4 MiB
-- `memory.max` = 512 MiB
-- `memory.min` = 256 MiB (HardReservation)
-
-### Results
+`memory.high` = 256 + 0.9 * (512 - 256) = 486.4 MiB
 
 | Metric | Value |
 |--------|-------|
-| Time to reach memory.high | ~48s |
-| Peak memory | 511.5 MiB |
-| Total `memory.events` high counter | 3,019 |
-| Duration to OOM-kill | 67s |
+| Time to reach memory.high | ~49s |
+| Peak memory | 511 MiB |
+| Total `memory.events` high counter | 3,596 |
+| Duration to OOM-kill | 71s |
 | Pod exit reason | OOMKilled |
-| Data points collected | 66 |
 
 Raw data: [`data/01-throttle-test-factor-0.9.csv`](data/01-throttle-test-factor-0.9.csv)
 
-Top panel: memory usage over time. Bottom panel: cumulative `memory.events` high counter.
-
 ![memory-throttle-timeline](images/01-memory-throttle-timeline.png)
 
-The container went from 486 MiB to 512 MiB under throttling and was OOM-killed as expected. On kernels < 5.9, this same workload got stuck indefinitely at `memory.high`. The kernel 5.9 fix resolves that.
-
 ---
 
-## 2. memory.min Protection
+## 2. Tiered Memory Protection
 
-Two Burstable pods on the same node - one holding memory below its requests, one allocating aggressively.
+Guaranteed pods get `memory.min` (hard protection). Burstable pods get `memory.low` (soft protection).
 
-**Pod specs**: [`manifests/protection-test-pods.yaml`](manifests/protection-test-pods.yaml)
-- Protected: requests=256Mi, limits=512Mi, holds 200 MiB
-- Aggressor: requests=64Mi, limits=512Mi, allocates 10 MiB/0.5s
+| QoS Class | memory.min | memory.low | memory.high |
+|-----------|-----------|-----------|------------|
+| Burstable (req=128Mi, lim=256Mi) | 0 | 128 MiB | 243 MiB |
+| Guaranteed (req=lim=256Mi) | 256 MiB | 0 | max |
+| BestEffort | 0 | 0 | max |
 
-### Results
+### Multi-container pod (Burstable)
 
-| Pod | memory.min | memory.current | memory.high | Status |
-|-----|-----------|----------------|-------------|--------|
-| Protected | 256 MiB | 204 MiB | 486 MiB | Running, unaffected |
-| Aggressor | 64 MiB | 501 MiB | 467 MiB | Running, throttled (5,551 high events) |
-
-Cgroup hierarchy `memory.min` values:
-
-| Level | memory.min |
-|-------|-----------|
-| kubepods.slice | 354 MiB |
-| kubepods-burstable.slice | 304 MiB |
-| Protected pod | 256 MiB |
-| Aggressor pod | 64 MiB |
-
-![cgroup-hierarchy](images/06-cgroup-hierarchy.png)
-
-Protected pod's 204 MiB stayed intact. `memory.min` propagates correctly through the full cgroup hierarchy.
-
----
-
-## 3. Guaranteed Pod Behavior
-
-Guaranteed pod (requests = limits = 256Mi) with MemoryQoS enabled.
-
-**Pod spec**: [`manifests/guaranteed-test-pod.yaml`](manifests/guaranteed-test-pod.yaml)
-
-| cgroup knob | Value |
-|-------------|-------|
-| memory.high | `max` (no throttling) |
-| memory.max | 256 MiB |
-| memory.min | 256 MiB |
-
-![guaranteed-vs-burstable](images/07-guaranteed-vs-burstable.png)
-
-`memory.high=max` means Guaranteed pods are not throttled. `memory.min=requests` gives them full reclaim protection. No overcommit means no need for throttling.
-
----
-
-## 4. BestEffort Pod Behavior
-
-Pod with no resource requests or limits.
-
-**Pod spec**: [`manifests/besteffort-test-pod.yaml`](manifests/besteffort-test-pod.yaml)
-
-| cgroup knob | Value |
-|-------------|-------|
-| memory.high | `max` |
-| memory.max | `max` |
-| memory.min | 0 |
-
-No throttling, no protection, no limit. `memory.min=0` means the kernel can reclaim all their memory under pressure.
-
----
-
-## 5. Multi-Container Pod
-
-Two containers in one pod: container-a (requests=128Mi, limits=256Mi) and container-b (requests=64Mi, limits=128Mi).
-
-**Pod spec**: [`manifests/multi-container-test-pod.yaml`](manifests/multi-container-test-pod.yaml)
-
-| Resource | memory.min | memory.high |
+| Resource | memory.low | memory.high |
 |----------|-----------|------------|
 | Container A (req=128Mi, lim=256Mi) | 128 MiB | 243 MiB |
 | Container B (req=64Mi, lim=128Mi) | 64 MiB | 121 MiB |
 | **Pod total** | **192 MiB** | -- |
 
-Pod-level `memory.min` = 128 + 64 = 192 MiB. Each container's `memory.high` is computed independently using `floor[(requests + factor * (limits - requests)) / pageSize] * pageSize`.
+### Cgroup hierarchy
+
+| Level | memory.min | memory.low |
+|-------|-----------|-----------|
+| kubepods.slice | 290 MiB | -- |
+| kubepods-burstable.slice | 0 | 240 MiB |
+
+![cgroup-hierarchy](images/06-cgroup-hierarchy.png)
+
+kubepods root `memory.min` covers total protected memory (guaranteed + burstable) so the kernel's effective protection hierarchy works correctly. Burstable QoS cgroup uses `memory.low` instead of `memory.min`.
 
 ---
 
-## 6. Pod Deletion Cleanup
+## 3. Application Latency Impact
 
-Created a pod with requests=200Mi, verified the QoS-class `memory.min` increased by 200 MiB, deleted the pod, verified `memory.min` returned to its original value after the next reconciliation loop (60s).
-
-**Pod spec**: [`manifests/deletion-test-pod.yaml`](manifests/deletion-test-pod.yaml)
-
-| State | Burstable QoS memory.min |
-|-------|-------------------------|
-| Before pod creation | 496 MiB |
-| After pod created (+ 60s loop) | 696 MiB (+200 MiB) |
-| After pod deleted (+ 60s loop) | 496 MiB (back to original) |
-
-The periodic `setMemoryQoS` loop correctly adds and removes `memory.min` contributions as pods come and go.
-
----
-
-## 7. Application Latency Impact
-
-Measured operation latency (1000 dict insertions) while gradually allocating memory from 0 to 512 MiB with memory.high at 486 MiB.
+Measured operation latency while gradually allocating memory from 0 to 512 MiB with memory.high at 486 MiB.
 
 | Memory | Latency | Ratio vs baseline |
 |--------|---------|-------------------|
-| 0-480 MiB | ~0.7-1.6ms | 1x |
-| 490 MiB | 110ms | ~150x |
-| 495 MiB | 239ms | ~340x |
-| 500 MiB | 336ms | ~480x |
-| 505 MiB | 1,023ms | ~1,460x |
+| 0-485 MiB | ~0.5ms | 1x |
+| 490 MiB | 27ms | ~54x |
+| 495 MiB | 119ms | ~238x |
+| 500 MiB | 448ms | ~896x |
+| 505 MiB | 336ms | ~672x |
 
 Raw data: [`data/latency-impact-factor-0.9.csv`](data/latency-impact-factor-0.9.csv)
 
 ![latency-impact](images/10-latency-impact.png)
 
-Latency is flat until memory crosses memory.high (486 MiB), then degrades progressively. At 505 MiB (19 MiB past memory.high), a 1000-op batch takes over 1 second. This quantifies the silent degradation concern raised in [#2570 comment](https://github.com/kubernetes/enhancements/issues/2570#issuecomment-3960592763). The `memory.events` high counter is the most direct kernel-native signal for this throttling.
+The `memory.events` high counter is the most direct kernel-native signal for this throttling.
 
 ---
 
-## 8. Node-Level Metric
-
-Queried `/metrics` on the kubelet.
+## 4. Node-Level Metric
 
 ```
-# HELP kubelet_memory_qos_node_memory_min_total_bytes [ALPHA] Total cgroup v2 memory.min
-# in bytes across all pods on the node.
-# TYPE kubelet_memory_qos_node_memory_min_total_bytes gauge
-kubelet_memory_qos_node_memory_min_total_bytes 5.05413632e+08
+# HELP kubelet_memory_qos_protected_bytes_total Total cgroup v2 protected memory
+# in bytes across all pods on the node (memory.min for Guaranteed, memory.low for Burstable).
+# TYPE kubelet_memory_qos_protected_bytes_total gauge
+kubelet_memory_qos_protected_bytes_total 5.05413632e+08
 ```
 
-482 MiB = sum of `memory.min` across all pods. Updated every 60 seconds in the `setMemoryQoS` loop. Feature-gated behind `MemoryQoS`.
+505 MiB = total protected memory across all pods. Updated every 60 seconds.
 
 ---
 
-## 9. Pod Without Memory Limit
+## 5. No-Limit Pod
 
-Burstable pod with requests=128Mi but no memory limit. Node allocatable: 63,996 MiB.
-
-**Pod spec**: [`manifests/no-limit-test-pod.yaml`](manifests/no-limit-test-pod.yaml)
+Burstable pod with requests=128Mi, no memory limit. Node allocatable: 63,996 MiB.
 
 | cgroup knob | Value |
 |-------------|-------|
-| memory.min | 128 MiB |
+| memory.low | 128 MiB |
 | memory.high | 57,609 MiB |
 | memory.max | `max` |
 
-When no limit is set, `memory.high = 128 + 0.9 * (63,996 - 128) = 57,609 MiB`.
+`memory.high = 128 + 0.9 * (63,996 - 128) = 57,609 MiB`.
 
 ---
 
-## 10. High Aggregate memory.min
+## 6. Repeated Trials
 
-Three pods each requesting 8Gi on a node with 64Gi allocatable. Sum is below allocatable in this test.
-
-| Level | memory.min |
-|-------|-----------|
-| Pod 1 | 8,192 MiB |
-| Pod 2 | 8,192 MiB |
-| Pod 3 | 8,192 MiB |
-| burstable QoS total | 24,816 MiB |
-| kubepods total | 24,866 MiB |
-| node allocatable | 63,996 MiB |
-
-If sum(memory.min) exceeds available memory, the kernel proportionally reduces each cgroup's effective protection based on sibling ratios ([cgroup v2 docs](https://docs.kernel.org/admin-guide/cgroup-v2.html)).
-
----
-
-## 11. Kubelet Overhead
-
-50 Burstable pods (requests=32Mi, limits=64Mi) at steady state.
-
-| Metric | Value |
-|--------|-------|
-| Kubelet CPU (30s average) | 2.00% of one core |
-| Kubelet memory | 79 MiB |
-| Pods managed | 50 |
-
-2.00% CPU is the total kubelet CPU in this single-node kind setup, not MemoryQoS alone. The `setMemoryQoS` loop runs every 60s. Writing `memory.min=0` when already set is a kernel no-op.
-
----
-
-## 12. Rollback Safety
-
-Burstable pod (requests=128Mi, limits=256Mi). Disabled MemoryQoS by removing `memoryReservationPolicy` and setting `MemoryQoS: false`, then restarted kubelet. Waited 90s.
-
-| cgroup knob | Before | After (90s) |
-|-------------|--------|-------------|
-| pod memory.min | 128 MiB | 0 (cleared) |
-| burstable QoS memory.min | 496 MiB | 0 (cleared) |
-| container memory.high | 243 MiB | 243 MiB (stale) |
-| container memory.min | 128 MiB | 128 MiB (stale) |
-
-QoS-class and pod-level values are cleared by the reconcile loop. Container-level values persist because they are set via `Unified` at creation time and require CRI runtime support to update. In this test, setting `MemoryQoS: false` while leaving `memoryReservationPolicy: HardReservation` caused the kubelet to crash-loop on startup:
-
-```
-E0317 00:20:18.641775 662232 run.go:72] "command failed" err="failed to validate kubelet
-  configuration, error: invalid configuration: memoryReservationPolicy \"HardReservation\"
-  requires MemoryQoS feature gate to be enabled"
-```
-
-Removing `memoryReservationPolicy` before disabling the gate resolved this. The 496 MiB burstable QoS total includes system pods (coredns, kube-proxy).
-
----
-
-## 13. Repeated Trials (factor 0.9)
-
-Three runs of the same throttle test.
+Three runs of the throttle test on the same fresh cluster.
 
 | Trial | Duration (s) | Throttle events | Outcome |
 |-------|-------------|-----------------|---------|
-| 1 | 63 | 2,677 | OOMKilled |
-| 2 | 75 | 4,140 | OOMKilled |
-| 3 | 61 | 2,713 | OOMKilled |
-| **Median** | **63** | **2,713** | |
+| 1 | 65 | 3,171 | OOMKilled |
+| 2 | 59 | 2,337 | OOMKilled |
+| 3 | 59 | 2,286 | OOMKilled |
 
-Variance is 61-75s (19% spread). All three follow the same pattern.
+Consistent results (59-65s, 9% spread).
 
 ---
 
@@ -280,8 +142,8 @@ Variance is 61-75s (19% spread). All three follow the same pattern.
 
 - `memoryThrottlingFactor=0.9` is the kubelet default. All tests use this value.
 - memory.high formula: `floor[(requests + factor * (limits - requests)) / pageSize] * pageSize`. MiB values in tables are rounded from exact byte values.
-- When no memory limit is set, `limits` in the formula is replaced with node allocatable memory.
-- Data was collected by polling cgroup files directly on the node (not via kubelet API). Surfacing `memory.events` through the kubelet stats API is a separate effort (PR [#137760](https://github.com/kubernetes/kubernetes/pull/137760)).
+- Tiered approach: Guaranteed pods get `memory.min`, Burstable pods get `memory.low`. This avoids hard-locking memory for overcommitted workloads (kubernetes/kubernetes#131077).
+- Data was collected by polling cgroup files directly on the node (not via kubelet API).
 
 ---
 
@@ -289,7 +151,6 @@ Variance is 61-75s (19% spread). All three follow the same pattern.
 
 - [KEP-2570: Memory QoS](https://github.com/kubernetes/enhancements/issues/2570)
 - [Kernel livelock fix (5.9)](https://github.com/torvalds/linux/commit/b3ff92916af)
-- [v1.28 beta stall report](https://docs.google.com/document/d/1mY0MTT34P-Eyv5G1t_Pqs4OWyIH-cg9caRKWmqYlSbI/edit)
+- [Tiered approach discussion](https://github.com/kubernetes/kubernetes/issues/131077)
 - [cgroup v2 memory controller docs](https://docs.kernel.org/admin-guide/cgroup-v2.html)
-- [Kubelet PR #137719 (kernel check, metrics, E2E tests)](https://github.com/kubernetes/kubernetes/pull/137719)
-- [Kubelet PR #137760 (CRI MemoryEvents)](https://github.com/kubernetes/kubernetes/pull/137760)
+- [Kubelet PR #137719](https://github.com/kubernetes/kubernetes/pull/137719)

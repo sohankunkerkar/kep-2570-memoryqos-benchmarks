@@ -2,7 +2,7 @@ kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
 - role: control-plane
-  image: memqos-node:latest  # custom build from memqos-kernel-metrics-e2e branch
+  image: memqos-node:v2  # custom build from memqos-kernel-metrics-e2e branch
   kubeadmConfigPatches:
   - |
     kind: KubeletConfiguration
