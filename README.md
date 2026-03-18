@@ -110,7 +110,50 @@ kubelet_memory_qos_protected_bytes_total 5.05413632e+08
 
 ---
 
-## 5. No-Limit Pod
+## 5. BestEffort Pod
+
+Pod with no resource requests or limits.
+
+| cgroup knob | Value |
+|-------------|-------|
+| memory.min | 0 |
+| memory.low | 0 |
+| memory.high | `max` |
+
+No protection, no throttling. BestEffort pods are first to be evicted under memory pressure.
+
+---
+
+## 6. Kubelet Overhead
+
+50 Burstable pods (requests=32Mi, limits=64Mi) at steady state on the fresh cluster.
+
+| Metric | Value |
+|--------|-------|
+| Kubelet CPU (30s average) | 3.00% of one core |
+| Kubelet memory | 85 MiB |
+| Pods managed | 50 |
+
+3.00% CPU is the total kubelet CPU in this single-node kind setup, not MemoryQoS alone.
+
+---
+
+## 7. Rollback Safety
+
+Burstable pod (requests=128Mi, limits=256Mi). Disabled MemoryQoS by removing `memoryReservationPolicy` and setting `MemoryQoS: false`, then restarted kubelet. Waited 90s.
+
+| cgroup knob | Before | After (90s) |
+|-------------|--------|-------------|
+| pod memory.low | 128 MiB | 0 (cleared) |
+| burstable QoS memory.low | 368 MiB | 0 (cleared) |
+| container memory.low | 128 MiB | 128 MiB (stale) |
+| container memory.min | 0 | 0 |
+
+QoS-class and pod-level values are cleared by the reconcile loop. Container-level values persist because they are set via `Unified` at creation time and require CRI runtime support to update. Both `memoryReservationPolicy` and the feature gate must be removed before restart, otherwise kubelet validation rejects the config.
+
+---
+
+## 8. No-Limit Pod
 
 Burstable pod with requests=128Mi, no memory limit. Node allocatable: 63,996 MiB.
 
@@ -124,7 +167,21 @@ Burstable pod with requests=128Mi, no memory limit. Node allocatable: 63,996 MiB
 
 ---
 
-## 6. Repeated Trials
+## 9. Deletion Cleanup
+
+Created a Burstable pod with requests=200Mi. Verified burstable QoS `memory.low` increased, deleted the pod, verified it returned to original after the next reconcile loop (60s).
+
+| State | Burstable QoS memory.low |
+|-------|-------------------------|
+| Before pod creation | 432 MiB |
+| After pod created (+ 60s loop) | 440 MiB (+8 MiB*) |
+| After pod deleted (+ 60s loop) | 240 MiB (cleaned up) |
+
+*The +8 delta is smaller than expected because system pod churn affected the total between measurements.
+
+---
+
+## 10. Repeated Trials
 
 Three runs of the throttle test on the same fresh cluster.
 
