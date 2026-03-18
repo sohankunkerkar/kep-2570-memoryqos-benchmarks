@@ -97,16 +97,19 @@ The `memory.events` high counter is the most direct kernel-native signal for thi
 
 ---
 
-## 4. Node-Level Metric
+## 4. Node-Level Metrics
+
+Two separate gauges for hard and soft memory protection:
 
 ```
-# HELP kubelet_memory_qos_node_protected_bytes Total cgroup v2 protected memory
-# in bytes across all pods on the node (memory.min for Guaranteed, memory.low for Burstable).
-# TYPE kubelet_memory_qos_node_protected_bytes gauge
-kubelet_memory_qos_node_protected_bytes 5.05413632e+08
+# TYPE kubelet_memory_qos_node_memory_min_bytes gauge
+kubelet_memory_qos_node_memory_min_bytes <guaranteed_total>
+
+# TYPE kubelet_memory_qos_node_memory_low_bytes gauge
+kubelet_memory_qos_node_memory_low_bytes <burstable_total>
 ```
 
-505 MiB = total protected memory across all pods. Updated every 60 seconds.
+`memory_min_bytes` tracks hard-reserved memory (Guaranteed pods, kernel never reclaims). `memory_low_bytes` tracks soft-reserved memory (Burstable pods, kernel may reclaim under extreme pressure). Split into two gauges so operators can assess actual OOM risk from each protection type.
 
 ---
 
